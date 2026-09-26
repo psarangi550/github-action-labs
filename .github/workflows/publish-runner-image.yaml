@@ -23,7 +23,7 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     env:
-      IMAGE_NAME: ghcr.io/lingarajkar/github-action-labs-runner
+      IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/github-action-labs-runner
       IMAGE_TAG: ${{ inputs.image_tag || github.ref_name }}
     steps:
       - name: Check out source

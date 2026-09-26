@@ -3,12 +3,12 @@
 set -euo pipefail
 
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+VALUES_FILE="$ROOT_DIR/deploy/arc-runner/values.yaml"
 ARC_CHART_VERSION="${ARC_CHART_VERSION:-0.23.7}"
-GHCR_USERNAME="${GHCR_USERNAME:-lingarajkar}"
-ARC_SYSTEM_NAMESPACE="arc-systems"
-RUNNER_NAMESPACE="arc-runners"
-ARC_RELEASE="arc"
-RUNNER_RELEASE="github-action-labs-runner"
+ARC_SYSTEM_NAMESPACE="${ARC_SYSTEM_NAMESPACE:-arc-systems}"
+RUNNER_NAMESPACE="${RUNNER_NAMESPACE:-arc-runners}"
+ARC_RELEASE="${ARC_RELEASE:-arc}"
+RUNNER_RELEASE="${RUNNER_RELEASE:-github-action-labs-runner}"
 ARC_CHART_CACHE="$ROOT_DIR/.helm-cache/actions-runner-controller-${ARC_CHART_VERSION}.tgz"
 
 cd "$ROOT_DIR"
@@ -19,6 +19,16 @@ for command in curl helm kubectl; do
     exit 1
   fi
 done
+
+# Default GHCR_USERNAME to the repository owner configured in the chart, so a
+# fork only needs to update deploy/arc-runner/values.yaml, not this script.
+DEFAULT_GHCR_USERNAME=$(grep -E '^\s*repository:' "$VALUES_FILE" | head -1 | sed -E 's/^\s*repository:\s*//' | cut -d/ -f1)
+GHCR_USERNAME="${GHCR_USERNAME:-$DEFAULT_GHCR_USERNAME}"
+
+if [[ -z "$GHCR_USERNAME" ]]; then
+  printf 'Could not determine GHCR_USERNAME from %s; set GHCR_USERNAME explicitly.\n' "$VALUES_FILE" >&2
+  exit 1
+fi
 
 if [[ -z "${GITHUB_PAT:-}" && -f .env ]]; then
   set -a

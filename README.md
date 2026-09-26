@@ -1,8 +1,21 @@
 # GitHub Actions Labs
 
-This repository contains GitHub Actions examples and the source-controlled configuration for a repository-scoped self-hosted runner on Kubernetes. The runner is managed by Actions Runner Controller (ARC) and is available to `lingarajkar/github-action-labs` with the `github-action-labs` label.
+This repository contains GitHub Actions examples and the source-controlled configuration for a repository-scoped self-hosted runner on Kubernetes. The runner is managed by Actions Runner Controller (ARC).
 
 No command in this repository deploys resources automatically. Review and run the commands below from your own terminal when you are ready.
+
+## Using your own fork
+
+All owner/repo/image references live in one place: `deploy/arc-runner/values.yaml`. To point this setup at your own fork, edit that file before doing anything else:
+
+```yaml
+runner:
+  repository: <your-github-username>/<your-repo>       # e.g. octocat/github-action-labs
+  image:
+    repository: ghcr.io/<your-github-username>/github-action-labs-runner
+```
+
+Everything else in this README and in `scripts/setup-runner.sh` derives `GHCR_USERNAME` and the target repository from that file, so you should not need to edit the script or the workflows.
 
 ## Repository layout
 
@@ -20,8 +33,12 @@ No command in this repository deploys resources automatically. Review and run th
 1. A Kubernetes cluster and a `kubectl` context pointing at it.
 2. Helm 3.
 3. Docker with permission to push to GitHub Container Registry (GHCR).
-4. A GitHub fine-grained personal access token restricted to `lingarajkar/github-action-labs` with **Administration: Read and write** permission.
+4. A GitHub personal access token for the repository set in `deploy/arc-runner/values.yaml` (`runner.repository`). You must have write/admin access to that repository:
+   - Classic PAT: `repo` scope.
+   - Fine-grained PAT: **Administration: Read and write** on that repository (required to mint runner registration tokens), plus `write:packages`/`read:packages` if you use it to push/pull the runner image on GHCR.
 5. Permission to create Kubernetes namespaces, secrets, and Helm releases.
+
+> A 403 error such as `You must have repository write permissions or have the repository runners fine-grained permission` when the runner registers means the token above doesn't have sufficient access to the target repository — it is not a bug in this chart. If you don't own the repository, ask an admin to grant access or generate the token themselves.
 
 Check the local tools and cluster context before continuing:
 
@@ -70,17 +87,18 @@ Authenticate Docker to GHCR, then build and publish the image:
 
 ```bash
 IMAGE_TAG=v1.0.0
+GHCR_USERNAME=<your-github-username>   # must match deploy/arc-runner/values.yaml
 
-printf '%s' "$GITHUB_PAT" | docker login ghcr.io -u lingarajkar --password-stdin
+printf '%s' "$GITHUB_PAT" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
 
 docker build \
-	--tag ghcr.io/lingarajkar/github-action-labs-runner:"$IMAGE_TAG" \
+	--tag ghcr.io/"$GHCR_USERNAME"/github-action-labs-runner:"$IMAGE_TAG" \
 	docker/runner
 
-docker push ghcr.io/lingarajkar/github-action-labs-runner:"$IMAGE_TAG"
+docker push ghcr.io/"$GHCR_USERNAME"/github-action-labs-runner:"$IMAGE_TAG"
 ```
 
-The chart image tag is configured in `deploy/arc-runner/values.yaml`. Use a new immutable tag for every image change.
+The chart image tag is configured in `deploy/arc-runner/values.yaml`. Use a new immutable tag for every image change. New GHCR packages default to **private** — the `ghcr-pull` secret (step 6) must authenticate as a user with read access to the package, or pods will sit in `ImagePullBackOff`.
 
 ### Publish with GitHub Actions
 
@@ -185,10 +203,12 @@ The custom runner image is private in GHCR. Create the `ghcr-pull` secret from a
 kubectl create secret docker-registry ghcr-pull \
 	--namespace arc-runners \
 	--docker-server=ghcr.io \
-	--docker-username=lingarajkar \
+	--docker-username=<your-github-username> \
 	--docker-password="$GITHUB_PAT" \
 	--dry-run=client -o yaml | kubectl apply -f -
 ```
+
+The username must match the GHCR namespace in `runner.image.repository`; a mismatched username causes `403 Forbidden`/`denied` pull errors even if the token is otherwise valid.
 
 The secret is referenced by `runner.imagePullSecrets` in `deploy/arc-runner/values.yaml` and is not stored in Git.
 
@@ -200,7 +220,7 @@ helm upgrade --install github-action-labs-runner \
 	--wait
 ```
 
-The chart creates a `RunnerDeployment` named `github-action-labs` for `lingarajkar/github-action-labs`.
+The chart creates a `RunnerDeployment` named `github-action-labs` for the repository set in `runner.repository`.
 
 Verify the runner resources and registration:
 
@@ -248,13 +268,32 @@ kubectl rollout status deployment/arc-actions-runner-controller \
 	--namespace arc-systems --timeout=2m
 ```
 
-If the runner pod is in `ImagePullBackOff`, confirm that the image was pushed and that the `ghcr-pull` secret exists in `arc-runners`:
+If the runner pod is in `ImagePullBackOff`, confirm that the image was pushed and that the `ghcr-pull` secret exists in `arc-runners` and uses the correct username:
 
 ```bash
-docker push ghcr.io/lingarajkar/github-action-labs-runner:<image-tag>
+docker push ghcr.io/<your-github-username>/github-action-labs-runner:<image-tag>
 kubectl get secret ghcr-pull --namespace arc-runners
 kubectl get pods --namespace arc-runners
 ```
+
+If the runner never registers with GitHub and the controller logs show `Failed to get new registration token` with a `403`, the PAT does not have write/admin access to `runner.repository` (see Prerequisites). Rotate/regenerate the token, update the `controller-manager` secret, and restart the controller:
+
+```bash
+kubectl create secret generic controller-manager --namespace arc-systems \
+	--from-literal=github_token="$GITHUB_PAT" \
+	--dry-run=client -o yaml | kubectl apply -f -
+kubectl rollout restart deployment/arc-actions-runner-controller --namespace arc-systems
+```
+
+If `kubectl get runnerdeployments` shows `DESIRED 0` even though `runner.replicas` is `1` in `values.yaml`, a previous `helm upgrade`/`--set` may have pinned `replicas: 0` on the release, and Helm's three-way merge won't correct a field that hasn't changed chart-side. Confirm and force it back:
+
+```bash
+helm get values github-action-labs-runner --namespace arc-runners
+kubectl patch runnerdeployment github-action-labs --namespace arc-runners \
+	--type=merge -p '{"spec":{"replicas":1}}'
+```
+
+Every file under `deploy/*/templates/` is rendered by Helm as a manifest (only `_`-prefixed files are treated as non-rendered partials). Never keep two template files that define the same resource (e.g. a `.yaml` and a leftover `.tpl` copy) — Helm applies both on every upgrade, and the ARC controller will thrash, repeatedly deleting and recreating `RunnerReplicaSet`s. If you see many `RunnerReplicaSetDeleted` events in a short window, check `ls deploy/arc-runner/templates/` for duplicates and `kubectl get runnerreplicasets --namespace arc-runners` for more than one replica set — delete the stale one (the one referencing the old image/repository).
 
 ## 9. Maintain the runner
 
