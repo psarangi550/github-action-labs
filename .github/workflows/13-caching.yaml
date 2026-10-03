@@ -31,8 +31,6 @@ jobs:
         uses: actions/setup-node@v3
         with:
           node-version: ${{ github.event.inputs.node-version }}
-      - name: Install dependencies
-        run: npm install
       - name: Calculate cache key
         id: cache-key
         run: echo "CACHE_KEY=deps-node-modules-${{ hashFiles('13-caching/react-app/package-lock.json') }}" >> $GITHUB_OUTPUT
